@@ -1,0 +1,88 @@
+# Importieren der erforderlichen Module und Bibliotheken
+import os
+import curses
+from curses import textpad
+import random
+import time
+import multiprocessing
+import uuid
+from datetime import datetime
+import posix_ipc
+
+
+# Zeichnet die Bingo-Karte im Terminal
+def draw_card(stdscr, card, marked, field_width, field_height, color_pair, game_won, winner=None):
+    stdscr.clear()  # Bildschirm löschen
+    max_y, max_x = stdscr.getmaxyx()  # Maximale Abmessungen des Bildschirms
+    for i, row in enumerate(card):
+        for j, word in enumerate(row):
+            x1, y1 = 2 + j * (field_width + 1), 2 + i * (field_height + 1)
+            x2, y2 = x1 + field_width, y1 + field_height
+            if y2 >= max_y or x2 >= max_x:
+                continue
+            textpad.rectangle(stdscr, y1, x1, y2, x2)  # Zeichnet ein Rechteck
+            if (i, j) in marked:
+                stdscr.addstr(y1 + (field_height // 2), x1 + 1, "X".center(field_width - 1), curses.A_REVERSE | color_pair)
+            else:
+                stdscr.addstr(y1 + (field_height // 2), x1 + 1, word[:field_width - 1].center(field_width - 1), color_pair)
+    if game_won:
+        win_message = f"Player {winner} won!" if winner else "You won!"
+        stdscr.addstr(max_y - 4, 2, win_message.center(max_x - 4), curses.A_BOLD | color_pair)
+    stdscr.addstr(max_y - 2, 2, "Press 'x' to exit the game", curses.A_BOLD | color_pair)
+    stdscr.refresh()
+
+# Lädt die Bingo-Karte aus einer Datei
+def load_bingo_card(game_id, player):
+    filename = f"bingo_{game_id}_{player}.txt"
+    with open(filename, "r", encoding='utf-8') as file:
+        return [line.split(',') for line in file.read().split('\n') if line]
+
+
+# Parsen einer Bingo-Karte aus einem String
+def parse_bingo_card(card_str):
+    return [line.split(',') for line in card_str.strip().split('\n')]
+
+
+# Startet ein neues Spiel
+def start_game():
+    game_id = str(uuid.uuid4())[:8]
+    print(f"Game ID: {game_id}")
+
+    rows = int(input("Please enter the number of rows for the Bingo card (minimum 3): "))
+    cols = int(input("Please enter the number of columns for the Bingo card (minimum 3): "))
+    wordfile = input("Please enter the path to the file with the buzzwords: ")
+
+    buzzwords = read_words_from_file(wordfile)
+
+    if len(buzzwords) < rows * cols:
+        print(f"Not enough words ({len(buzzwords)}) for a {rows}x{cols} Bingo card.")
+        return
+
+    users = 2
+    start_time = datetime.now()
+    round_filename = create_round_file(game_id, rows, cols, users, wordfile, start_time)
+
+    server_game = BingoCard(rows, cols, words=buzzwords)
+    save_bingo_card(game_id, server_game.card, "server")
+
+    client_game = BingoCard(rows, cols, words=buzzwords)
+    save_bingo_card(game_id, client_game.card, "client")
+
+    game_info = {'receive_queues': [], 'players': []}
+    save_game_info(game_id, game_info)
+
+    print(f"Game ID: {game_id}")
+    print("Waiting for players to join...")
+
+    player_joined = multiprocessing.Event()
+    join_check_process = multiprocessing.Process(target=check_player_join, args=(game_id, player_joined))
+    join_check_process.start()
+
+    # Warten, bis mindestens ein Spieler beitritt
+    player_joined.wait()
+
+    join_check_process.terminate()
+    join_check_process.join()
+
+    game_info = load_game_info(game_id)  # Aktualisierte Spielinformationen neu laden
+    curses.wrapper(main, rows, cols, load_bingo_card(game_id, "server"), f"/bingo_queue_{game_id}_player_server_send", game_info['receive_queues'], game_id, round_filename, "server")
