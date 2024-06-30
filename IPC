@@ -1,0 +1,117 @@
+import posix_ipc  # Interprozesskommunikation für POSIX-kompatible Systeme
+import logging  # Protokollierung von Ereignissen, Fehlern und anderen Informationen
+import curses  # Terminal-Steuerung für die Erstellung von Text-Benutzeroberflächen
+import time  # Zeitfunktionen
+import multiprocessing  # Unterstützung für parallele Ausführung und Prozesse
+
+
+# Erstellt eine Nachrichtenwarteschlange
+def create_message_queue(name, max_message_size=1024):
+    try:
+        mq = posix_ipc.MessageQueue(name, flags=posix_ipc.O_CREAT, mode=0o666, max_message_size=max_message_size)
+        return mq
+    except Exception as e:
+        logging.error(f"Error creating message queue: {e}")
+        return None
+
+# Sendet eine Nachricht an die Warteschlange
+def send_message(mq, message):
+    try:
+        mq.send(message.encode())
+        logging.debug(f"Message sent successfully: {message}")
+    except posix_ipc.BusyError as e:
+        logging.error(f"Message queue is full or busy: {e}")
+    except posix_ipc.ExistentialError as e:
+        logging.error(f"Message queue does not exist: {e}")
+    except posix_ipc.PermissionError as e:
+        logging.error(f"Permission error while sending message: {e}")
+    except Exception as e:
+        logging.error(f"Error sending message: {e}")
+
+# Empfängt eine Nachricht aus der Warteschlange
+def receive_message(mq, message_size=1024):
+    try:
+        message, _ = mq.receive(message_size)
+        logging.debug(f"Message received: {message.decode()}")
+        return message.decode()
+    except Exception as e:
+        logging.error(f"Error receiving message: {e}")
+        return None
+
+# Bereinigt die Nachrichtenwarteschlange
+def cleanup_message_queue(mq, name):
+    try:
+        mq.close()
+        mq.unlink()
+    except Exception as e:
+        logging.error(f"Error cleaning up message queue: {e}")
+
+# Prozess, der Nachrichten in die Warteschlange schreibt
+def write_to_queue(message_queue, queue, color_pair, stdscr, max_y, win_event):
+    while not win_event.is_set():
+        row, col = queue.get()
+        if row is None and col is None:
+            break
+        try:
+            stdscr.addstr(1, 2, f"Marked: {row},{col}", curses.A_BOLD | color_pair)
+            logging.info(f"Marked: {row},{col}")
+        except Exception as e:
+            stdscr.addstr(max_y - 3, 2, f"Error writing to queue: {e}", curses.A_BOLD | color_pair)
+            stdscr.refresh()
+
+# Prozess, der Nachrichten aus der Warteschlange liest
+def read_from_queue(message_queue, game, marked, draw_card, stdscr, field_width, field_height, color_pair, win_event):
+    while not win_event.is_set():
+        try:
+            message = receive_message(message_queue)
+            if message and message.startswith("Player"):
+                winner = message.split()[1]
+                win_event.set()
+                stdscr.addstr(1, 2, "Win message received", curses.A_BOLD | color_pair)
+                draw_card(stdscr, game.card, marked, field_width, field_height, color_pair, True, winner=winner)
+                logging.info(f"Win message received: {message}")
+                stdscr.refresh()
+                time.sleep(2)  # Warten Sie 2 Sekunden, bevor das Spiel endet
+                break
+        except Exception as e:
+            stdscr.addstr(3, 2, f"Error reading from queue: {e}", curses.A_BOLD | color_pair)
+            stdscr.refresh()
+
+# Hauptspielschleife
+def main_game_loop(stdscr, rows, cols, game, marked, message_queues, queue, color_pair, yellow_blue, win_event, player):
+    max_y, max_x = stdscr.getmaxyx()  # Maximale Abmessungen des Bildschirms
+    field_width = 10  # Anpassung der Feldbreite für 7x7 Raster
+    field_height = 1  # Anpassung der Feldhöhe für 7x7 Raster
+
+    while not win_event.is_set():
+        key = stdscr.getch()
+        if key == ord('x'):
+            queue.put((None, None))
+            logging.info("Game exited")
+            win_event.set()
+            break
+        if key == curses.KEY_MOUSE:
+            _, mx, my, _, _ = curses.getmouse()
+            col = (mx - 2) // (field_width + 1)
+            row = (my - 2) // (field_height + 1)
+            if 0 <= row < rows and 0 <= col < cols:
+                if (row, col) in marked:
+                    marked.remove((row, col))
+                    game.unmark(row, col)
+                else:
+                    marked.add((row, col))
+                    game.mark(row, col)
+                draw_card(stdscr, game.card, marked, field_width, field_height, color_pair, False)
+
+                queue.put((row, col))
+
+                if game.check_bingo():
+                    stdscr.addstr(2 + rows * (field_height + 1), 2, f"Player {player} won!".center((field_width + 1) * cols), yellow_blue)
+                    stdscr.addstr(3, 2, "Win message sent", curses.A_BOLD | color_pair)
+                    stdscr.refresh()
+                    for mq in message_queues:
+                        send_message(mq, f"Player {player} won!")
+                        stdscr.addstr(4, 2, "Win message sent", curses.A_BOLD | color_pair)
+                    logging.info(f"Player {player} won!")
+                    win_event.set()
+                    break
