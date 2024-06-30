@@ -1,0 +1,89 @@
+import random
+import copy
+import logging
+import uuid
+import curses
+
+class BingoCard:
+    def __init__(self, rows, cols, words=None, card=None):
+        self.rows = rows  # Anzahl der Zeilen der Bingo-Karte
+        self.cols = cols  # Anzahl der Spalten der Bingo-Karte
+        if card:
+            self.card = card  # Verwendet eine bestehende Karte
+        else:
+            self.card = self.create_card(words)  # Erstellt eine neue Karte mit den angegebenen Wörtern
+        self.original_card = [row[:] for row in self.card]  # Speichert eine Kopie der ursprünglichen Karte
+        self.mark_middle_as_joker()  # Markiert das mittlere Feld als Joker, falls zutreffend
+
+    def create_card(self, words):
+        card = []
+        chosen_words = random.sample(words, self.rows * self.cols)  # Zufällige Auswahl der Wörter
+        index = 0
+        for i in range(self.rows):
+            row = []
+            for j in range(self.cols):
+                row.append(chosen_words[index])
+                index += 1
+            card.append(row)
+        return card
+
+    def mark_middle_as_joker(self):
+        if self.rows == self.cols and self.rows % 2 == 1 and self.rows in [5, 7]:  # Prüft, ob die Karte 5x5 oder 7x7 ist
+            middle = self.rows // 2
+            self.card[middle][middle] = "Joker"
+            self.original_card[middle][middle] = "Joker"
+
+    def check_bingo(self):
+        for row in self.card:
+            if all(cell == 'X' or cell == 'Joker' for cell in row):  # Überprüft vollständige Zeile
+                return True
+
+        for col in range(self.cols):
+            if all(self.card[row][col] == 'X' or self.card[row][col] == 'Joker' for row in range(self.rows)):  # Überprüft vollständige Spalte
+                return True
+
+        if all(self.card[i][i] == 'X' or self.card[i][i] == 'Joker' for i in range(min(self.rows, self.cols))):  # Überprüft Diagonale von oben links nach unten rechts
+            return True
+
+        if all(self.card[i][self.cols - i - 1] == 'X' or self.card[i][self.cols - i - 1] == 'Joker' for i in range(min(self.rows, self.cols))):  # Überprüft Diagonale von oben rechts nach unten links
+            return True
+
+        return False
+
+    def mark(self, row, col):
+        if self.card[row][col] != 'Joker':
+            self.card[row][col] = 'X'  # Markiert ein Feld mit 'X'
+
+    def unmark(self, row, col):
+        if self.card[row][col] == 'X':
+            self.card[row][col] = self.original_card[row][col]  # Entfernt die Markierung von einem Feld
+
+   # Spieler tritt einem bestehenden Spiel bei
+def join_game(game_id):
+    try:
+        rows, cols, words = load_round_file(game_id)
+    except FileNotFoundError as e:
+        logging.error(e)
+        return
+
+    card = [words[i * cols:(i + 1) * cols] for i in range(rows)]
+
+    player_id = str(uuid.uuid4())[:8]
+    send_queue_name = f"/bingo_queue_{game_id}player{player_id}_send"
+    receive_queue_name = f"/bingo_queue_{game_id}player{player_id}_receive"
+
+    logging.info(f"Player {player_id} joined")
+
+    game_info = load_game_info(game_id)
+    game_info['players'].append(player_id)
+    game_info['receive_queues'].append(receive_queue_name)
+    save_game_info(game_id, game_info)
+
+    curses.wrapper(main, rows, cols, card, send_queue_name, game_info['receive_queues'], game_id, f"{game_id}_round.txt", player_id)
+
+# Formatiert die Bingo-Karte als String
+def format_bingo_card(card):
+    formatted_card = []
+    for row in card:
+        formatted_card.append(','.join(row))
+    return '\n'.join(formatted_card)
