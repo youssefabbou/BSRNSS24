@@ -1,0 +1,108 @@
+import curses  # Terminal-Steuerung für die Erstellung von Text-Benutzeroberflächen
+import multiprocessing  # Unterstützung für parallele Ausführung und Prozesse
+import logging  # Protokollierung von Ereignissen, Fehlern und anderen Informationen
+import os  # Betriebssystemfunktionen wie Datei- und Verzeichnisverwaltung
+from datetime import datetime  # Funktionen zur Handhabung von Datum und Uhrzeit
+
+# Hauptfunktion des Spiels
+def main(stdscr, rows, cols, card, send_queue_name, receive_queue_names, game_id, round_filename, player):
+    curses.start_color()
+    curses.init_pair(1, curses.COLOR_RED, curses.COLOR_BLACK)
+    curses.init_pair(2, curses.COLOR_YELLOW, curses.COLOR_BLUE)
+    color_pair = curses.color_pair(1)
+    yellow_blue = curses.color_pair(2)
+
+    game = BingoCard(rows, cols, card=card)
+    marked = set()
+    win_event = multiprocessing.Event()
+
+    if rows == cols and rows % 2 == 1 and rows in [5, 7]:  # Markiert das mittlere Feld als Joker, falls zutreffend
+        middle = rows // 2
+        marked.add((middle, middle))
+
+    field_width = 10  # Anpassung der Feldbreite für 7x7 Raster
+    field_height = 1  # Anpassung der Feldhöhe für 7x7 Raster
+
+    curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
+
+    draw_card(stdscr, game.card, marked, field_width, field_height, color_pair, False)
+
+    queue = multiprocessing.Queue()
+    max_y, max_x = stdscr.getmaxyx()
+
+    send_queue = create_message_queue(send_queue_name)
+    receive_queues = [create_message_queue(name) for name in receive_queue_names]
+
+    write_process = multiprocessing.Process(target=write_to_queue, args=(send_queue, queue, color_pair, stdscr, max_y, win_event))
+    read_processes = [
+        multiprocessing.Process(target=read_from_queue, args=(receive_queue, game, marked, draw_card, stdscr, field_width, field_height, color_pair, win_event))
+        for receive_queue in receive_queues
+    ]
+    game_process = multiprocessing.Process(target=main_game_loop, args=(stdscr, rows, cols, game, marked, receive_queues, queue, color_pair, yellow_blue, win_event, player))
+
+    write_process.start()
+    for read_process in read_processes:
+        read_process.start()
+    game_process.start()
+
+    logging.info("Game started")
+    game_process.join()
+    write_process.join()
+    for read_process in read_processes:
+        read_process.join()
+
+    end_time = datetime.now()
+    logging.info(f"Game ended at: {end_time}")
+
+    with open(round_filename, 'a', encoding='utf-8') as round_file:
+        round_file.write(f"End time: {end_time}\n")
+        round_file.write("Marked coordinates:\n")
+        for mark in marked:
+            round_file.write(f"{mark}\n")
+
+    cleanup_message_queue(send_queue, send_queue_name)
+    for receive_queue in receive_queues:
+        cleanup_message_queue(receive_queue, receive_queue.name)
+
+# Lädt Spielinformationen aus einer Datei
+def load_game_info(game_id):
+    filename = f"game_info_{game_id}.txt"
+    with open(filename, 'r', encoding='utf-8') as file:
+        lines = file.readlines()
+        receive_queues = [line.strip() for line in lines[1:]]
+        return {'receive_queues': receive_queues, 'players': [receive_queue.split('_')[-2] for receive_queue in receive_queues]}
+
+# Speichert Spielinformationen in einer Datei
+def save_game_info(game_id, game_info):
+    filename = f"game_info_{game_id}.txt"
+    with open(filename, 'w', encoding='utf-8') as file:
+        file.write(f"{len(game_info['players'])}\n")
+        for player_id in game_info['players']:
+            receive_queue_name = f"/bingo_queue_{game_id}player{player_id}_receive"
+            file.write(f"{receive_queue_name}\n")
+
+# Lädt eine Runde aus einer Datei
+def load_round_file(game_id):
+    for filename in os.listdir('.'):
+        if filename.endswith(f"-bingo-{game_id}.txt"):
+            with open(filename, 'r', encoding='utf-8') as file:
+                lines = file.readlines()
+                rows = int(lines[0].split(': ')[1])
+                cols = int(lines[1].split(': ')[1])
+                wordfile = lines[3].split(': ')[1].strip()
+                words = read_words_from_file(wordfile)
+                return rows, cols, words
+    raise FileNotFoundError(f"No round file found for game ID {game_id}")
+
+# Erstellt eine neue Runden-Datei
+def create_round_file(game_id, rows, cols, users, wordfile, start_time):
+    timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+    filename = f"{timestamp}-bingo-{game_id}.txt"
+    with open(filename, 'w', encoding='utf-8') as file:
+        file.write(f"Height: {rows}\n")
+        file.write(f"Width: {cols}\n")
+        file.write(f"Users: {users}\n")
+        file.write(f"Wordfile: {wordfile}\n")
+        file.write(f"Start time: {start_time}\n")
+    logging.info(f"Round file created: {filename}")
+    return filename
