@@ -1,8 +1,9 @@
 import random
-import copy
 import logging
 import uuid
 import curses
+
+logging.basicConfig(filename='bingo_game.log', level=logging.INFO, format='%(asctime)s - %(message)s', filemode='a')
 
 class BingoCard:
     def __init__(self, rows, cols, words=None, card=None):
